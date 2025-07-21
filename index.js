@@ -1,52 +1,68 @@
-const fs = require("fs");
-const pino = require("pino");
-const { default: makeWASocket, useMultiFileAuthState, downloadContentFromMessage } = require("@whiskeysockets/baileys");
+import makeWASocket, { useSingleFileAuthState, downloadContentFromMessage } from "@whiskeysockets/baileys";
+import { Boom } from "@hapi/boom";
+import P from "pino";
+import fs from "fs";
+import path from "path";
 
-// === Load Commands Automatically ===
-const commands = {};
-fs.readdirSync("./commands").forEach((file) => {
-  if (file.endsWith(".js")) {
-    const cmd = require(`./commands/${file}`);
-    commands[cmd.name] = cmd;
-    console.log(`✅ Command Loaded: ${cmd.name}`);
+const { state, saveState } = useSingleFileAuthState('./auth_info.json');
+
+const sock = makeWASocket({
+  auth: state,
+  printQRInTerminal: false, // deprecated, handle QR yourself
+  logger: P({ level: 'silent' }),
+});
+
+sock.ev.on('connection.update', (update) => {
+  const { connection, lastDisconnect, qr } = update;
+
+  if(qr) {
+    console.log("Scan this QR code with your WhatsApp:");
+    console.log(qr);  // You might want to use some QR terminal library to print it nicely
+  }
+
+  if(connection === 'close') {
+    const shouldReconnect = (lastDisconnect.error instanceof Boom) && lastDisconnect.error.output.statusCode !== 401;
+    console.log('Connection closed due to', lastDisconnect.error, ', reconnecting:', shouldReconnect);
+    if(shouldReconnect) {
+      startSock();
+    } else {
+      console.log('Connection closed. Exiting.');
+      process.exit();
+    }
+  }
+
+  if(connection === 'open') {
+    console.log('✅ Bot Connected Successfully!');
   }
 });
 
-async function startBot() {
-  const { state, saveCreds } = await useMultiFileAuthState("./session");
-  const sock = makeWASocket({
-    logger: pino({ level: "silent" }),
-    printQRInTerminal: true,
-    auth: state,
-  });
+sock.ev.on('creds.update', saveState);
 
-  sock.ev.on("creds.update", saveCreds);
+sock.ev.on('messages.upsert', async ({ messages, type }) => {
+  const msg = messages[0];
+  if(!msg.message) return;
 
-  sock.ev.on("messages.upsert", async ({ messages }) => {
-    const m = messages[0];
-    if (!m.message || !m.key.remoteJid) return;
+  // Detect if it's a status message (statuses are on 'status@broadcast')
+  msg.isStatus = msg.key.remoteJid === 'status@broadcast';
 
-    const from = m.key.remoteJid;
-    const type = Object.keys(m.message)[0];
-    const body =
-      (type === "conversation" && m.message.conversation) ||
-      (type === "extendedTextMessage" && m.message.extendedTextMessage.text) ||
-      "";
+  // Get message text
+  let text = '';
+  if(msg.message.conversation) text = msg.message.conversation;
+  else if(msg.message.extendedTextMessage?.text) text = msg.message.extendedTextMessage.text;
+  else if(msg.message.imageMessage?.caption) text = msg.message.imageMessage.caption;
+  else if(msg.message.videoMessage?.caption) text = msg.message.videoMessage.caption;
 
-    if (!body.startsWith(".")) return;
-    const args = body.trim().split(/ +/).slice(1);
-    const commandName = body.slice(1).trim().split(/ +/)[0].toLowerCase();
+  if(!text) return;
 
-    if (commands[commandName]) {
-      console.log(`📥 Executing command: ${commandName}`);
-      try {
-        await commands[commandName].execute(sock, m, args);
-      } catch (err) {
-        console.error(err);
-        await sock.sendMessage(from, { text: "❌ Error running command." });
-      }
+  // Check if message starts with .vv command
+  if(text.startsWith('.vv')) {
+    try {
+      const command = await import('./commands/vv.js');
+      await command.default(sock, msg);
+    } catch (e) {
+      console.log('Error running .vv command:', e);
     }
-  });
-}
+  }
+});
 
-startBot();
+console.log("Starting bot...");
