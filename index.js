@@ -1,4 +1,10 @@
-import makeWASocket, { useSingleFileAuthState, downloadContentFromMessage } from "@whiskeysockets/baileys";
+import baileysPkg from "@whiskeysockets/baileys";
+
+const { 
+  default: makeWASocket,
+  useSingleFileAuthState,
+  downloadContentFromMessage
+} = baileysPkg;
 import { Boom } from "@hapi/boom";
 import P from "pino";
 import fs from "fs";
