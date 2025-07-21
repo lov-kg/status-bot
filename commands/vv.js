@@ -1,39 +1,37 @@
-const { downloadContentFromMessage } = require("@whiskeysockets/baileys");
+const { downloadContentFromMessage, writeFile } = require("@whiskeysockets/baileys");
 const fs = require("fs");
 const path = require("path");
 
 module.exports = {
   name: "vv",
-  description: "Download WhatsApp status (image or video)",
-  execute: async (sock, m, args) => {
+  description: "Download WhatsApp status",
+  execute: async (sock, m) => {
     try {
-      if (!m.quoted) return await sock.sendMessage(m.chat, { text: "❌ Reply to a status to download it!" });
+      if (!m.quoted) return await sock.sendMessage(m.chat, { text: "Reply to a status with .vv" }, { quoted: m });
 
-      const msg = m.quoted.message;
-      const type = Object.keys(msg)[0];
+      let msg = m.quoted;
+      let mime = (msg.msg || msg).mimetype || "";
 
-      if (!["imageMessage", "videoMessage"].includes(type)) {
-        return await sock.sendMessage(m.chat, { text: "❌ This is not a status image or video!" });
-      }
+      if (!mime) return await sock.sendMessage(m.chat, { text: "This is not a media status." }, { quoted: m });
 
-      const stream = await downloadContentFromMessage(msg[type], type.replace("Message", ""));
+      let messageType = mime.split("/")[0];
+      let stream = await downloadContentFromMessage(msg, messageType);
       let buffer = Buffer.from([]);
-      for await (const chunk of stream) {
-        buffer = Buffer.concat([buffer, chunk]);
-      }
 
-      const fileName = `status_${Date.now()}.${type === "imageMessage" ? "jpg" : "mp4"}`;
+      for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
+
+      let fileName = `status-${Date.now()}.${mime.split("/")[1]}`;
       fs.writeFileSync(fileName, buffer);
 
       await sock.sendMessage(m.chat, {
-        [type === "imageMessage" ? "image" : "video"]: { url: fileName },
-        caption: "✅ Status downloaded!"
-      });
+        [messageType]: fs.readFileSync(fileName),
+        caption: "✅ Here’s the status!"
+      }, { quoted: m });
 
-      setTimeout(() => fs.unlinkSync(fileName), 10000); // Delete after 10s
-    } catch (err) {
-      console.error(err);
-      await sock.sendMessage(m.chat, { text: "❌ Failed to download status." });
+      fs.unlinkSync(fileName);
+    } catch (e) {
+      console.log(e);
+      await sock.sendMessage(m.chat, { text: "❌ Failed to download status." }, { quoted: m });
     }
   }
 };
