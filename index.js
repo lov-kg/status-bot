@@ -1,56 +1,63 @@
 const {
-  default: makeWASocket,
-  useMultiFileAuthState,
-  downloadContentFromMessage
+    default: makeWASocket,
+    useMultiFileAuthState,
+    DisconnectReason
 } = require("@whiskeysockets/baileys");
-const Pino = require("pino");
-const fs = require("fs-extra");
-const qrcode = require("qrcode-terminal"); // to show QR in console
 
-async function connectBot() {
-  const { state, saveCreds } = await useMultiFileAuthState("./auth");
-  const sock = makeWASocket({
-    auth: state,
-    logger: Pino({ level: "silent" })
-  });
+const fs = require('fs');
+const qrcode = require('qrcode');
+const express = require('express');
+const pino = require('pino');
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-  sock.ev.on("creds.update", saveCreds);
+async function startBot() {
+    const { state, saveCreds } = await useMultiFileAuthState("auth_info");
 
-  // ✅ Handle QR code properly
-  sock.ev.on("connection.update", ({ qr, connection, lastDisconnect }) => {
-    if (qr) {
-      console.clear();
-      console.log("Scan this QR to connect:");
-      qrcode.generate(qr, { small: true });
-    }
-    if (connection === "open") console.log("✅ Bot connected!");
-    if (connection === "close") console.log("❌ Bot disconnected!");
-  });
+    const sock = makeWASocket({
+        logger: pino({ level: "silent" }),
+        printQRInTerminal: false, // we disable terminal QR
+        auth: state
+    });
 
-  // ✅ Status (.vv) command
-  sock.ev.on("messages.upsert", async ({ messages }) => {
-    const m = messages[0];
-    if (!m.message) return;
+    sock.ev.on("connection.update", async (update) => {
+        const { connection, lastDisconnect, qr } = update;
 
-    if (m.message.conversation === ".vv") {
-      const quoted = m.message?.extendedTextMessage?.contextInfo?.quotedMessage;
-      if (!quoted) return;
+        if (qr) {
+            console.log("✅ Generating QR, open in browser...");
+            await qrcode.toFile('qr.png', qr); // Save as qr.png
+        }
 
-      let type = Object.keys(quoted)[0];
-      let stream = await downloadContentFromMessage(
-        quoted[type],
-        type.includes("image") ? "image" : "video"
-      );
-      let buffer = Buffer.from([]);
-      for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
+        if (connection === "close") {
+            const shouldReconnect =
+                lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+            console.log("Connection closed due to", lastDisconnect.error, "Reconnecting:", shouldReconnect);
+            if (shouldReconnect) startBot();
+        } else if (connection === "open") {
+            console.log("✅ Bot Connected Successfully!");
+        }
+    });
 
-      await sock.sendMessage(
-        m.key.remoteJid,
-        { [type.includes("image") ? "image" : "video"]: buffer },
-        { quoted: m }
-      );
-    }
-  });
+    sock.ev.on("creds.update", saveCreds);
 }
 
-connectBot();
+// Web server to show QR
+app.get("/", (req, res) => {
+    if (fs.existsSync("qr.png")) {
+        res.send(`<h2>Scan this QR:</h2><img src="/qr" style="width:300px;height:300px;" />`);
+    } else {
+        res.send("No QR generated yet. Please wait...");
+    }
+});
+
+app.get("/qr", (req, res) => {
+    if (fs.existsSync("qr.png")) {
+        res.sendFile(__dirname + "/qr.png");
+    } else {
+        res.send("No QR yet.");
+    }
+});
+
+app.listen(PORT, () => console.log(`✅ Web QR Server Running on port ${PORT}`));
+
+startBot();
