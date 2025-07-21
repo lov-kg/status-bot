@@ -1,74 +1,66 @@
-import baileysPkg from "@whiskeysockets/baileys";
-
-const { 
+import baileysPkg from '@whiskeysockets/baileys';
+const {
   default: makeWASocket,
-  useSingleFileAuthState,
-  downloadContentFromMessage
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion
 } = baileysPkg;
-import { Boom } from "@hapi/boom";
-import P from "pino";
-import fs from "fs";
-import path from "path";
 
-const { state, saveState } = useSingleFileAuthState('./auth_info.json');
+async function startBot() {
+  // Auth state - this folder will store your session files
+  const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
 
-const sock = makeWASocket({
-  auth: state,
-  printQRInTerminal: false, // deprecated, handle QR yourself
-  logger: P({ level: 'silent' }),
-});
+  // Get latest version to avoid issues
+  const { version, isLatest } = await fetchLatestBaileysVersion();
 
-sock.ev.on('connection.update', (update) => {
-  const { connection, lastDisconnect, qr } = update;
+  // Create the socket connection
+  const sock = makeWASocket({
+    version,
+    auth: state,
+    printQRInTerminal: true, // prints QR code to terminal once at startup
+  });
 
-  if(qr) {
-    console.log("Scan this QR code with your WhatsApp:");
-    console.log(qr);  // You might want to use some QR terminal library to print it nicely
-  }
+  // Listen for credentials update, save them
+  sock.ev.on('creds.update', saveCreds);
 
-  if(connection === 'close') {
-    const shouldReconnect = (lastDisconnect.error instanceof Boom) && lastDisconnect.error.output.statusCode !== 401;
-    console.log('Connection closed due to', lastDisconnect.error, ', reconnecting:', shouldReconnect);
-    if(shouldReconnect) {
-      startSock();
-    } else {
-      console.log('Connection closed. Exiting.');
-      process.exit();
+  // Connection update listener (logs connection status)
+  sock.ev.on('connection.update', (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+      console.log('QR Code received, scan it with WhatsApp!');
+      // optionally: show qr in terminal or send it somewhere else
     }
-  }
 
-  if(connection === 'open') {
-    console.log('✅ Bot Connected Successfully!');
-  }
-});
-
-sock.ev.on('creds.update', saveState);
-
-sock.ev.on('messages.upsert', async ({ messages, type }) => {
-  const msg = messages[0];
-  if(!msg.message) return;
-
-  // Detect if it's a status message (statuses are on 'status@broadcast')
-  msg.isStatus = msg.key.remoteJid === 'status@broadcast';
-
-  // Get message text
-  let text = '';
-  if(msg.message.conversation) text = msg.message.conversation;
-  else if(msg.message.extendedTextMessage?.text) text = msg.message.extendedTextMessage.text;
-  else if(msg.message.imageMessage?.caption) text = msg.message.imageMessage.caption;
-  else if(msg.message.videoMessage?.caption) text = msg.message.videoMessage.caption;
-
-  if(!text) return;
-
-  // Check if message starts with .vv command
-  if(text.startsWith('.vv')) {
-    try {
-      const command = await import('./commands/vv.js');
-      await command.default(sock, msg);
-    } catch (e) {
-      console.log('Error running .vv command:', e);
+    if (connection === 'close') {
+      const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+      console.log('Connection closed, reconnecting?', shouldReconnect);
+      if (shouldReconnect) {
+        startBot(); // reconnect on unexpected close
+      } else {
+        console.log('Connection closed. You are logged out.');
+      }
+    } else if (connection === 'open') {
+      console.log('✅ Bot Connected Successfully!');
     }
-  }
-});
+  });
 
-console.log("Starting bot...");
+  // Message listener example (simple echo)
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+    const msg = messages[0];
+    if (!msg.message) return;
+
+    const sender = msg.key.remoteJid;
+    const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
+
+    console.log('Message from:', sender, 'Text:', text);
+
+    if (text.toLowerCase() === '.ping') {
+      await sock.sendMessage(sender, { text: 'pong' });
+    }
+  });
+}
+
+// Start the bot
+startBot().catch(err => console.error('Failed to start bot:', err));
